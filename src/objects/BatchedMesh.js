@@ -1,41 +1,92 @@
-import {
-	BufferAttribute,
-	BufferGeometry,
-	DataTexture,
-	FloatType,
-	MathUtils,
-	Matrix4,
-	Mesh,
-	RGBAFormat,
-	Box3,
-	Sphere,
-	Frustum,
-	WebGLCoordinateSystem,
-	WebGPUCoordinateSystem,
-	Vector3,
-} from 'three';
+import { BufferAttribute } from '../core/BufferAttribute.js';
+import { BufferGeometry } from '../core/BufferGeometry.js';
+import { DataTexture } from '../textures/DataTexture.js';
+import { FloatType } from '../constants.js';
+import { Matrix4 } from '../math/Matrix4.js';
+import { Mesh } from './Mesh.js';
+import { RGBAFormat } from '../constants.js';
+import { Box3 } from '../math/Box3.js';
+import { Sphere } from '../math/Sphere.js';
+import { Frustum } from '../math/Frustum.js';
+import { WebGLCoordinateSystem } from '../constants.js';
+import { WebGPUCoordinateSystem } from '../constants.js';
+import { Vector3 } from '../math/Vector3.js';
+
+function sortOpaque( a, b ) {
+
+	return a.z - b.z;
+
+}
+
+function sortTransparent( a, b ) {
+
+	return b.z - a.z;
+
+}
+
+class MultiDrawRenderList {
+
+	constructor() {
+
+		this.index = 0;
+		this.pool = [];
+		this.list = [];
+
+	}
+
+	push( drawRange, z ) {
+
+		const pool = this.pool;
+		const list = this.list;
+		if ( this.index >= pool.length ) {
+
+			pool.push( {
+
+				start: - 1,
+				count: - 1,
+				z: - 1,
+
+			} );
+
+		}
+
+		const item = pool[ this.index ];
+		list.push( item );
+		this.index ++;
+
+		item.start = drawRange.start;
+		item.count = drawRange.count;
+		item.z = z;
+
+	}
+
+	reset() {
+
+		this.list.length = 0;
+		this.index = 0;
+
+	}
+
+}
 
 const ID_ATTR_NAME = 'batchId';
 const _matrix = new Matrix4();
 const _identityMatrix = new Matrix4();
-const _zeroScaleMatrix = new Matrix4().set(
-	0, 0, 0, 0,
-	0, 0, 0, 0,
-	0, 0, 0, 0,
-	0, 0, 0, 1,
-);
 const _projScreenMatrix = new Matrix4();
 const _frustum = new Frustum();
 const _box = new Box3();
 const _sphere = new Sphere();
 const _vector = new Vector3();
+const _renderList = new MultiDrawRenderList();
+const _mesh = new Mesh();
+const _batchIntersects = [];
 
 // @TODO: SkinnedMesh support?
-// @TODO: Future work if needed. Move into the core. Can be optimized more with WEBGL_multi_draw.
 // @TODO: geometry.groups support?
 // @TODO: geometry.drawRange support?
 // @TODO: geometry.morphAttributes support?
 // @TODO: Support uniform parameter per geometry
+// @TODO: Add an "optimize" function to pack geometry and remove data gaps
 
 // copies data from attribute "src" into "target" starting at "targetOffset"
 function copyAttributeData( src, target, targetOffset = 0 ) {
@@ -75,13 +126,14 @@ class BatchedMesh extends Mesh {
 
 		this.isBatchedMesh = true;
 		this.perObjectFrustumCulled = true;
+		this.sortObjects = true;
 		this.boundingBox = null;
 		this.boundingSphere = null;
 
 		this._drawRanges = [];
 		this._reservedRanges = [];
 
-		this._visible = [];
+		this._visibility = [];
 		this._active = [];
 		this._bounds = [];
 
@@ -91,9 +143,10 @@ class BatchedMesh extends Mesh {
 
 		this._geometryInitialized = false;
 		this._geometryCount = 0;
-		this._multiDrawCounts = null;
-		this._multiDrawStarts = null;
+		this._multiDrawCounts = new Int32Array( maxGeometryCount );
+		this._multiDrawStarts = new Int32Array( maxGeometryCount );
 		this._multiDrawCount = 0;
+		this._visibilityChanged = true;
 
 		// Local matrix per geometry by using data texture
 		this._matricesTexture = null;
@@ -112,7 +165,7 @@ class BatchedMesh extends Mesh {
 		//       64x64 pixel texture max 1024 matrices * 4 pixels = (64 * 64)
 
 		let size = Math.sqrt( this._maxGeometryCount * 4 ); // 4 pixels needed for 1 matrix
-		size = MathUtils.ceilPowerOfTwo( size );
+		size = Math.ceil( size / 4 ) * 4;
 		size = Math.max( size, 4 );
 
 		const matricesArray = new Float32Array( size * size * 4 ); // 4 floats per RGBA pixel
@@ -159,8 +212,6 @@ class BatchedMesh extends Mesh {
 			geometry.setAttribute( ID_ATTR_NAME, new BufferAttribute( idArray, 1 ) );
 
 			this._geometryInitialized = true;
-			this._multiDrawCounts = new Int32Array( maxGeometryCount );
-			this._multiDrawStarts = new Int32Array( maxGeometryCount );
 
 		}
 
@@ -386,13 +437,13 @@ class BatchedMesh extends Mesh {
 
 		}
 
-		const visible = this._visible;
+		const visibility = this._visibility;
 		const active = this._active;
 		const matricesTexture = this._matricesTexture;
 		const matricesArray = this._matricesTexture.image.data;
 
 		// push new visibility states
-		visible.push( true );
+		visibility.push( true );
 		active.push( true );
 
 		// update id
@@ -543,6 +594,7 @@ class BatchedMesh extends Mesh {
 		const drawRange = this._drawRanges[ id ];
 		const posAttr = geometry.getAttribute( 'position' );
 		drawRange.count = hasIndex ? srcIndex.count : posAttr.count;
+		this._visibilityChanged = true;
 
 		return id;
 
@@ -553,8 +605,6 @@ class BatchedMesh extends Mesh {
 		// Note: User needs to call optimize() afterward to pack the data.
 
 		const active = this._active;
-		const matricesArray = this._matricesTexture.image.data;
-		const matricesTexture = this._matricesTexture;
 		if ( geometryId >= active.length || active[ geometryId ] === false ) {
 
 			return this;
@@ -562,8 +612,7 @@ class BatchedMesh extends Mesh {
 		}
 
 		active[ geometryId ] = false;
-		_zeroScaleMatrix.toArray( matricesArray, geometryId * 16 );
-		matricesTexture.needsUpdate = true;
+		this._visibilityChanged = true;
 
 		return this;
 
@@ -662,12 +711,6 @@ class BatchedMesh extends Mesh {
 
 	}
 
-	optimize() {
-
-		throw new Error( 'BatchedMesh: Optimize function not implemented.' );
-
-	}
-
 	setMatrixAt( geometryId, matrix ) {
 
 		// @TODO: Map geometryId to index of the arrays because
@@ -707,7 +750,7 @@ class BatchedMesh extends Mesh {
 
 	setVisibleAt( geometryId, value ) {
 
-		const visible = this._visible;
+		const visibility = this._visibility;
 		const active = this._active;
 		const geometryCount = this._geometryCount;
 
@@ -716,21 +759,23 @@ class BatchedMesh extends Mesh {
 		if (
 			geometryId >= geometryCount ||
 			active[ geometryId ] === false ||
-			visible[ geometryId ] === value
+			visibility[ geometryId ] === value
 		) {
 
 			return this;
 
 		}
 
-		visible[ geometryId ] = value;
+		visibility[ geometryId ] = value;
+		this._visibilityChanged = true;
+
 		return this;
 
 	}
 
 	getVisibleAt( geometryId ) {
 
-		const visible = this._visible;
+		const visibility = this._visibility;
 		const active = this._active;
 		const geometryCount = this._geometryCount;
 
@@ -741,13 +786,70 @@ class BatchedMesh extends Mesh {
 
 		}
 
-		return visible[ geometryId ];
+		return visibility[ geometryId ];
 
 	}
 
-	raycast() {
+	raycast( raycaster, intersects ) {
 
-		console.warn( 'BatchedMesh: Raycast function not implemented.' );
+		const visibility = this._visibility;
+		const active = this._active;
+		const drawRanges = this._drawRanges;
+		const geometryCount = this._geometryCount;
+		const matrixWorld = this.matrixWorld;
+		const batchGeometry = this.geometry;
+
+		// iterate over each geometry
+		_mesh.material = this.material;
+		_mesh.geometry.index = batchGeometry.index;
+		_mesh.geometry.attributes = batchGeometry.attributes;
+		if ( _mesh.geometry.boundingBox === null ) {
+
+			_mesh.geometry.boundingBox = new Box3();
+
+		}
+
+		if ( _mesh.geometry.boundingSphere === null ) {
+
+			_mesh.geometry.boundingSphere = new Sphere();
+
+		}
+
+		for ( let i = 0; i < geometryCount; i ++ ) {
+
+			if ( ! visibility[ i ] || ! active[ i ] ) {
+
+				continue;
+
+			}
+
+			const drawRange = drawRanges[ i ];
+			_mesh.geometry.setDrawRange( drawRange.start, drawRange.count );
+
+			// ge the intersects
+			this.getMatrixAt( i, _mesh.matrixWorld ).premultiply( matrixWorld );
+			this.getBoundingBoxAt( i, _mesh.geometry.boundingBox );
+			this.getBoundingSphereAt( i, _mesh.geometry.boundingSphere );
+			_mesh.raycast( raycaster, _batchIntersects );
+
+			// add batch id to the intersects
+			for ( let j = 0, l = _batchIntersects.length; j < l; j ++ ) {
+
+				const intersect = _batchIntersects[ j ];
+				intersect.object = this;
+				intersect.batchId = i;
+				intersects.push( intersect );
+
+			}
+
+			_batchIntersects.length = 0;
+
+		}
+
+		_mesh.material = null;
+		_mesh.geometry.index = null;
+		_mesh.geometry.attributes = {};
+		_mesh.geometry.setDrawRange( 0, Infinity );
 
 	}
 
@@ -757,13 +859,14 @@ class BatchedMesh extends Mesh {
 
 		this.geometry = source.geometry.clone();
 		this.perObjectFrustumCulled = source.perObjectFrustumCulled;
+		this.sortObjects = source.sortObjects;
 		this.boundingBox = source.boundingBox !== null ? source.boundingBox.clone() : null;
 		this.boundingSphere = source.boundingSphere !== null ? source.boundingSphere.clone() : null;
 
 		this._drawRanges = source._drawRanges.map( range => ( { ...range } ) );
 		this._reservedRanges = source._reservedRanges.map( range => ( { ...range } ) );
 
-		this._visible = source._visible.slice();
+		this._visibility = source._visibility.slice();
 		this._active = source._active.slice();
 		this._bounds = source._bounds.map( bound => ( {
 			boxInitialized: bound.boxInitialized,
@@ -785,6 +888,8 @@ class BatchedMesh extends Mesh {
 		this._matricesTexture = source._matricesTexture.clone();
 		this._matricesTexture.image.data = this._matricesTexture.image.slice();
 
+		return this;
+
 	}
 
 	dispose() {
@@ -800,12 +905,20 @@ class BatchedMesh extends Mesh {
 
 	onBeforeRender( _renderer, _scene, camera, geometry, material/*, _group*/ ) {
 
+		// if visibility has not changed and frustum culling and object sorting is not required
+		// then skip iterating over all items
+		if ( ! this._visibilityChanged && ! this.perObjectFrustumCulled && ! this.sortObjects ) {
+
+			return;
+
+		}
+
 		// the indexed version of the multi draw function requires specifying the start
 		// offset in bytes.
 		const index = geometry.getIndex();
 		const bytesPerElement = index === null ? 1 : index.array.BYTES_PER_ELEMENT;
 
-		const visible = this._visible;
+		const visibility = this._visibility;
 		const multiDrawStarts = this._multiDrawStarts;
 		const multiDrawCounts = this._multiDrawCounts;
 		const drawRanges = this._drawRanges;
@@ -825,30 +938,87 @@ class BatchedMesh extends Mesh {
 		}
 
 		let count = 0;
-		for ( let i = 0, l = visible.length; i < l; i ++ ) {
 
-			if ( visible[ i ] ) {
+		if ( this.sortObjects ) {
 
-				// determine whether the batched geometry is within the frustum
-				let culled = false;
-				if ( perObjectFrustumCulled ) {
+			// get the camera position
+			_vector.setFromMatrixPosition( camera.matrixWorld );
 
-					// get the bounds in camera space
+			for ( let i = 0, l = visibility.length; i < l; i ++ ) {
+
+				if ( visibility[ i ] ) {
+
 					this.getMatrixAt( i, _matrix );
-
-					// get the bounds
-					this.getBoundingBoxAt( i, _box ).applyMatrix4( _matrix );
 					this.getBoundingSphereAt( i, _sphere ).applyMatrix4( _matrix );
-					culled = ! _frustum.intersectsBox( _box ) || ! _frustum.intersectsSphere( _sphere );
+
+					// determine whether the batched geometry is within the frustum
+					let culled = false;
+					if ( perObjectFrustumCulled ) {
+
+						// get the bounds in camera space
+						this.getMatrixAt( i, _matrix );
+
+						// get the bounds
+						this.getBoundingBoxAt( i, _box ).applyMatrix4( _matrix );
+						culled = ! _frustum.intersectsBox( _box ) || ! _frustum.intersectsSphere( _sphere );
+
+					}
+
+					if ( ! culled ) {
+
+						// get the distance from camera used for sorting
+						const z = _vector.distanceToSquared( _sphere.center );
+						_renderList.push( drawRanges[ i ], z );
+
+					}
 
 				}
 
-				if ( ! culled ) {
+			}
 
-					const range = drawRanges[ i ];
-					multiDrawStarts[ count ] = range.start * bytesPerElement;
-					multiDrawCounts[ count ] = range.count;
-					count ++;
+			// Sort the draw ranges and prep for rendering
+			const list = _renderList.list;
+			list.sort( material.transparent ? sortTransparent : sortOpaque );
+
+			for ( let i = 0, l = list.length; i < l; i ++ ) {
+
+				const item = list[ i ];
+				multiDrawStarts[ count ] = item.start * bytesPerElement;
+				multiDrawCounts[ count ] = item.count;
+				count ++;
+
+			}
+
+			_renderList.reset();
+
+		} else {
+
+			for ( let i = 0, l = visibility.length; i < l; i ++ ) {
+
+				if ( visibility[ i ] ) {
+
+					// determine whether the batched geometry is within the frustum
+					let culled = false;
+					if ( perObjectFrustumCulled ) {
+
+						// get the bounds in camera space
+						this.getMatrixAt( i, _matrix );
+
+						// get the bounds
+						this.getBoundingBoxAt( i, _box ).applyMatrix4( _matrix );
+						this.getBoundingSphereAt( i, _sphere ).applyMatrix4( _matrix );
+						culled = ! _frustum.intersectsBox( _box ) || ! _frustum.intersectsSphere( _sphere );
+
+					}
+
+					if ( ! culled ) {
+
+						const range = drawRanges[ i ];
+						multiDrawStarts[ count ] = range.start * bytesPerElement;
+						multiDrawCounts[ count ] = range.count;
+						count ++;
+
+					}
 
 				}
 
@@ -857,8 +1027,7 @@ class BatchedMesh extends Mesh {
 		}
 
 		this._multiDrawCount = count;
-
-		// @TODO: Implement geometry sorting for transparent and opaque materials
+		this._visibilityChanged = false;
 
 	}
 

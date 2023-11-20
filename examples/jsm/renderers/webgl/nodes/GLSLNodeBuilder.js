@@ -5,6 +5,8 @@ import NodeUniformsGroup from '../../common/nodes/NodeUniformsGroup.js';
 
 import { NodeSampledTexture, NodeSampledCubeTexture } from '../../common/nodes/NodeSampledTexture.js';
 
+import { IntType } from 'three';
+
 const glslMethods = {
 	[ MathNode.ATAN2 ]: 'atan',
 	textureDimensions: 'textureSize'
@@ -19,6 +21,13 @@ const precisionLib = {
 const supports = {
 	instance: true
 };
+
+const defaultPrecisions = `
+precision highp float;
+precision highp int;
+precision mediump sampler2DArray;
+precision lowp sampler2DShadow;
+`;
 
 class GLSLNodeBuilder extends NodeBuilder {
 
@@ -74,35 +83,51 @@ ${ flowData.code }
 
 	}
 
-	getTexture( texture, textureProperty, uvSnippet ) {
+	generateTextureLoad( texture, textureProperty, uvIndexSnippet, depthSnippet, levelSnippet = '0' ) {
 
-		if ( texture.isTextureCube ) {
+		if ( depthSnippet ) {
 
-			return `textureCube( ${textureProperty}, ${uvSnippet} )`;
-
-		} else if ( texture.isDepthTexture ) {
-
-			return `texture( ${textureProperty}, ${uvSnippet} ).x`;
+			return `texelFetch( ${ textureProperty }, ivec3( ${ uvIndexSnippet }, ${ depthSnippet } ), ${ levelSnippet } )`;
 
 		} else {
 
-			return `texture( ${textureProperty}, ${uvSnippet} )`;
+			return `texelFetch( ${ textureProperty }, ${ uvIndexSnippet }, ${ levelSnippet } )`;
 
 		}
 
 	}
 
-	getTextureLevel( texture, textureProperty, uvSnippet, biasSnippet ) {
+	generateTexture( texture, textureProperty, uvSnippet, depthSnippet ) {
 
-		return `textureLod( ${textureProperty}, ${uvSnippet}, ${biasSnippet} )`;
+		if ( texture.isTextureCube ) {
+
+			return `textureCube( ${ textureProperty }, ${ uvSnippet } )`;
+
+		} else if ( texture.isDepthTexture ) {
+
+			return `texture( ${ textureProperty }, ${ uvSnippet } ).x`;
+
+		} else {
+
+			if ( depthSnippet ) uvSnippet = `vec3( ${ uvSnippet }, ${ depthSnippet } )`;
+
+			return `texture( ${ textureProperty }, ${ uvSnippet } )`;
+
+		}
 
 	}
 
-	getTextureCompare( texture, textureProperty, uvSnippet, compareSnippet, shaderStage = this.shaderStage ) {
+	generateTextureLevel( texture, textureProperty, uvSnippet, levelSnippet ) {
+
+		return `textureLod( ${ textureProperty }, ${ uvSnippet }, ${ levelSnippet } )`;
+
+	}
+
+	generateTextureCompare( texture, textureProperty, uvSnippet, compareSnippet, depthSnippet, shaderStage = this.shaderStage ) {
 
 		if ( shaderStage === 'fragment' ) {
 
-			return `texture( ${textureProperty}, vec3( ${uvSnippet}, ${compareSnippet} ) )`;
+			return `texture( ${ textureProperty }, vec3( ${ uvSnippet }, ${ compareSnippet } ) )`;
 
 		} else {
 
@@ -148,19 +173,25 @@ ${ flowData.code }
 
 			if ( uniform.type === 'texture' ) {
 
-				if ( uniform.node.value.compareFunction ) {
+				const texture = uniform.node.value;
 
-					snippet = `sampler2DShadow ${uniform.name};`;
+				if ( texture.compareFunction ) {
+
+					snippet = `sampler2DShadow ${ uniform.name };`;
+
+				} else if ( texture.isDataArrayTexture === true ) {
+
+					snippet = `sampler2DArray ${ uniform.name };`;
 
 				} else {
 
-					snippet = `sampler2D ${uniform.name};`;
+					snippet = `sampler2D ${ uniform.name };`;
 
 				}
 
 			} else if ( uniform.type === 'cubeTexture' ) {
 
-				snippet = `samplerCube ${uniform.name};`;
+				snippet = `samplerCube ${ uniform.name };`;
 
 			} else if ( uniform.type === 'buffer' ) {
 
@@ -169,7 +200,7 @@ ${ flowData.code }
 				const bufferCount = bufferNode.bufferCount;
 
 				const bufferCountSnippet = bufferCount > 0 ? bufferCount : '';
-				snippet = `${bufferNode.name} {\n\t${bufferType} ${uniform.name}[${bufferCountSnippet}];\n};\n`;
+				snippet = `${bufferNode.name} {\n\t${ bufferType } ${ uniform.name }[${ bufferCountSnippet }];\n};\n`;
 
 			} else {
 
@@ -221,6 +252,30 @@ ${ flowData.code }
 		output += bindingSnippets.join( '\n' );
 
 		return output;
+
+	}
+
+	getTypeFromAttribute( attribute ) {
+
+		let nodeType = super.getTypeFromAttribute( attribute );
+
+		if ( /^[iu]/.test( nodeType ) && attribute.gpuType !== IntType ) {
+
+			let dataAttribute = attribute;
+
+			if ( attribute.isInterleavedBufferAttribute ) dataAttribute = attribute.data;
+
+			const array = dataAttribute.array;
+
+			if ( ( array instanceof Uint32Array || array instanceof Int32Array ) === false ) {
+
+				nodeType = nodeType.slice( 1 );
+
+			}
+
+		}
+
+		return nodeType;
 
 	}
 
@@ -329,7 +384,7 @@ ${ flowData.code }
 
 	getVertexIndex() {
 
-		return 'gl_VertexID';
+		return 'uint( gl_VertexID )';
 
 	}
 
@@ -380,8 +435,7 @@ ${vars}
 ${ this.getSignature() }
 
 // precision
-precision highp float;
-precision highp int;
+${ defaultPrecisions }
 
 // uniforms
 ${shaderData.uniforms}
@@ -417,9 +471,7 @@ void main() {
 ${ this.getSignature() }
 
 // precision
-precision highp float;
-precision highp int;
-precision lowp sampler2DShadow;
+${ defaultPrecisions }
 
 // uniforms
 ${shaderData.uniforms}
