@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 	<head>
-		<title>three.js webgl - gainmap hdr</title>
+		<title>three.js webgl - hdr jpg</title>
 		<meta charset="utf-8">
 		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
 		<link type="text/css" rel="stylesheet" href="main.css">
@@ -27,9 +27,9 @@
 
 	<body>
 		<div id="info">
-			<a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> - gain map (ultra hdr) loader <br/>
-			Gain map images converted from hdr with <a href="https://gainmap-creator.mono-grid.com/" target="_blank" rel="noopener">Gain map converter</a>. <br />
-			See external <a href="https://github.com/MONOGRID/gainmap-js" target="_blank" rel="noopener">gainmap-js</a> for more information on how to use and create gain map images.
+			<a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> - hdr jpg loader <br/>
+			Converted from hdr with <a href="https://gainmap-creator.mono-grid.com/" target="_blank" rel="noopener">converter</a>. <br />
+			See external <a href="https://github.com/MONOGRID/gainmap-js" target="_blank" rel="noopener">gainmap-js</a> for more information.
 		</div>
 
 		<div id="lbl_left" class="lbl"></div>
@@ -39,7 +39,7 @@
 				"imports": {
 					"three": "../build/three.module.js",
 					"three/addons/": "./jsm/",
-					"@monogrid/gainmap-js": "https://unpkg.com/@monogrid/gainmap-js@2.0.5/dist/decode.js"
+					"@monogrid/gainmap-js": "https://unpkg.com/@monogrid/gainmap-js@3.0.0/dist/decode.js"
 				}
 			}
 		</script>
@@ -59,7 +59,7 @@
 			const params = {
 				envMap: 'HDR JPG',
 				roughness: 0.0,
-				metalness: 0.0,
+				metalness: 1.0,
 				exposure: 1.0,
 				debug: false
 			};
@@ -85,19 +85,17 @@
 				container = document.createElement( 'div' );
 				document.body.appendChild( container );
 
-				camera = new THREE.PerspectiveCamera( 40, window.innerWidth / window.innerHeight, 1, 1000 );
-				camera.position.set( 0, 0, 120 );
+				camera = new THREE.PerspectiveCamera( 50, window.innerWidth / window.innerHeight, 1, 500 );
+				camera.position.set( 0, 0, - 120 );
 
 				scene = new THREE.Scene();
-				scene.background = new THREE.Color( 0x000000 );
 
 				renderer = new THREE.WebGLRenderer();
 				renderer.toneMapping = THREE.ACESFilmicToneMapping;
 
 				//
 
-				let geometry = new THREE.TorusKnotGeometry( 18, 8, 150, 20 );
-				// let geometry = new THREE.SphereGeometry( 26, 64, 32 );
+				let geometry = new THREE.TorusKnotGeometry( 18, 8, 200, 40, 1, 3 );
 				let material = new THREE.MeshStandardMaterial( {
 					color: 0xffffff,
 					metalness: params.metalness,
@@ -134,15 +132,13 @@
 						resolutions[ 'HDR JPG' ] = hdrJpg.width + 'x' + hdrJpg.height;
 						displayStats( 'HDR JPG' );
 			
-						hdrJpgPMREMRenderTarget = pmremGenerator.fromEquirectangular( hdrJpg.renderTarget.texture );
+						hdrJpgEquirectangularMap = hdrJpg.renderTarget.texture;
+						hdrJpgPMREMRenderTarget = pmremGenerator.fromEquirectangular( hdrJpgEquirectangularMap );
 			
-						hdrJpgEquirectangularMap = hdrJpg.toDataTexture();
 						hdrJpgEquirectangularMap.mapping = THREE.EquirectangularReflectionMapping;
-						hdrJpgEquirectangularMap.minFilter = THREE.LinearFilter;
-						hdrJpgEquirectangularMap.magFilter = THREE.LinearFilter;
-						hdrJpgEquirectangularMap.generateMipmaps = false;
-
 						hdrJpgEquirectangularMap.needsUpdate = true;
+
+						hdrJpg.dispose();
 
 					}, function ( progress ) {
 
@@ -159,15 +155,13 @@
 
 						resolutions[ 'Webp Gain map (separate)' ] = gainMap.width + 'x' + gainMap.height;
 			
-						gainMapPMREMRenderTarget = pmremGenerator.fromEquirectangular( gainMap.renderTarget.texture );
+						gainMapBackground = hdrJpg.renderTarget.texture;
+						gainMapPMREMRenderTarget = pmremGenerator.fromEquirectangular( gainMapBackground );
 
-						gainMapBackground = gainMap.toDataTexture();
 						gainMapBackground.mapping = THREE.EquirectangularReflectionMapping;
-						gainMapBackground.minFilter = THREE.LinearFilter;
-						gainMapBackground.magFilter = THREE.LinearFilter;
-						gainMapBackground.generateMipmaps = false;
-
 						gainMapBackground.needsUpdate = true;
+
+						gainMap.dispose();
 			
 					}, function ( progress ) {
 
@@ -285,11 +279,11 @@
 
 					case 'HDR JPG':
 						pmremRenderTarget = hdrJpgPMREMRenderTarget;
-						equirectangularMap = hdrJpgEquirectangularMap || hdrJpg.renderTarget.texture;
+						equirectangularMap = hdrJpgEquirectangularMap;
 						break;
 					case 'Webp Gain map (separate)':
 						pmremRenderTarget = gainMapPMREMRenderTarget;
-						equirectangularMap = gainMapBackground || gainMap.renderTarget.texture;
+						equirectangularMap = gainMapBackground;
 						break;
 					case 'HDR':
 						pmremRenderTarget = hdrPMREMRenderTarget;
@@ -302,9 +296,6 @@
 
 				if ( newEnvMap && newEnvMap !== torusMesh.material.envMap ) {
 
-					torusMesh.material.envMap = newEnvMap;
-					torusMesh.material.needsUpdate = true;
-
 					planeMesh.material.map = newEnvMap;
 					planeMesh.material.needsUpdate = true;
 
@@ -313,6 +304,7 @@
 				torusMesh.rotation.y += 0.005;
 				planeMesh.visible = params.debug;
 
+				scene.environment = equirectangularMap;
 				scene.background = equirectangularMap;
 				renderer.toneMappingExposure = params.exposure;
 

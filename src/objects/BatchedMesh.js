@@ -70,15 +70,16 @@ class MultiDrawRenderList {
 }
 
 const ID_ATTR_NAME = 'batchId';
-const _matrix = new Matrix4();
-const _identityMatrix = new Matrix4();
-const _projScreenMatrix = new Matrix4();
-const _frustum = new Frustum();
-const _box = new Box3();
-const _sphere = new Sphere();
-const _vector = new Vector3();
-const _renderList = new MultiDrawRenderList();
-const _mesh = new Mesh();
+const _matrix = /*@__PURE__*/ new Matrix4();
+const _invMatrixWorld = /*@__PURE__*/ new Matrix4();
+const _identityMatrix = /*@__PURE__*/ new Matrix4();
+const _projScreenMatrix = /*@__PURE__*/ new Matrix4();
+const _frustum = /*@__PURE__*/ new Frustum();
+const _box = /*@__PURE__*/ new Box3();
+const _sphere = /*@__PURE__*/ new Sphere();
+const _vector = /*@__PURE__*/ new Vector3();
+const _renderList = /*@__PURE__*/ new MultiDrawRenderList();
+const _mesh = /*@__PURE__*/ new Mesh();
 const _batchIntersects = [];
 
 // @TODO: SkinnedMesh support?
@@ -120,6 +121,12 @@ function copyAttributeData( src, target, targetOffset = 0 ) {
 
 class BatchedMesh extends Mesh {
 
+	get maxGeometryCount() {
+
+		return this._maxGeometryCount;
+
+	}
+
 	constructor( maxGeometryCount, maxVertexCount, maxIndexCount = maxVertexCount * 2, material ) {
 
 		super( new BufferGeometry(), material );
@@ -129,6 +136,7 @@ class BatchedMesh extends Mesh {
 		this.sortObjects = true;
 		this.boundingBox = null;
 		this.boundingSphere = null;
+		this.customSort = null;
 
 		this._drawRanges = [];
 		this._reservedRanges = [];
@@ -261,42 +269,10 @@ class BatchedMesh extends Mesh {
 
 	}
 
-	getGeometryCount() {
+	setCustomSort( func ) {
 
-		return this._geometryCount;
-
-	}
-
-	getVertexCount() {
-
-		const reservedRanges = this._reservedRanges;
-		if ( reservedRanges.length === 0 ) {
-
-			return 0;
-
-		} else {
-
-			const finalRange = reservedRanges[ reservedRanges.length - 1 ];
-			return finalRange.vertexStart + finalRange.vertexCount;
-
-		}
-
-	}
-
-	getIndexCount() {
-
-		const reservedRanges = this._reservedRanges;
-		const geometry = this.geometry;
-		if ( geometry.getIndex() === null || reservedRanges.length === 0 ) {
-
-			return 0;
-
-		} else {
-
-			const finalRange = reservedRanges[ reservedRanges.length - 1 ];
-			return finalRange.indexStart + finalRange.indexCount;
-
-		}
+		this.customSort = func;
+		return this;
 
 	}
 
@@ -903,7 +879,7 @@ class BatchedMesh extends Mesh {
 
 	}
 
-	onBeforeRender( _renderer, _scene, camera, geometry, material/*, _group*/ ) {
+	onBeforeRender( renderer, scene, camera, geometry, material/*, _group*/ ) {
 
 		// if visibility has not changed and frustum culling and object sorting is not required
 		// then skip iterating over all items
@@ -924,7 +900,7 @@ class BatchedMesh extends Mesh {
 		const drawRanges = this._drawRanges;
 		const perObjectFrustumCulled = this.perObjectFrustumCulled;
 
-		// prepare the frustum
+		// prepare the frustum in the local frame
 		if ( perObjectFrustumCulled ) {
 
 			_projScreenMatrix
@@ -932,22 +908,23 @@ class BatchedMesh extends Mesh {
 				.multiply( this.matrixWorld );
 			_frustum.setFromProjectionMatrix(
 				_projScreenMatrix,
-				_renderer.isWebGPURenderer ? WebGPUCoordinateSystem : WebGLCoordinateSystem
+				renderer.isWebGPURenderer ? WebGPUCoordinateSystem : WebGLCoordinateSystem
 			);
 
 		}
 
 		let count = 0;
-
 		if ( this.sortObjects ) {
 
-			// get the camera position
-			_vector.setFromMatrixPosition( camera.matrixWorld );
+			// get the camera position in the local frame
+			_invMatrixWorld.copy( this.matrixWorld ).invert();
+			_vector.setFromMatrixPosition( camera.matrixWorld ).applyMatrix4( _invMatrixWorld );
 
 			for ( let i = 0, l = visibility.length; i < l; i ++ ) {
 
 				if ( visibility[ i ] ) {
 
+					// get the bounds in world space
 					this.getMatrixAt( i, _matrix );
 					this.getBoundingSphereAt( i, _sphere ).applyMatrix4( _matrix );
 
@@ -955,19 +932,14 @@ class BatchedMesh extends Mesh {
 					let culled = false;
 					if ( perObjectFrustumCulled ) {
 
-						// get the bounds in camera space
-						this.getMatrixAt( i, _matrix );
-
-						// get the bounds
-						this.getBoundingBoxAt( i, _box ).applyMatrix4( _matrix );
-						culled = ! _frustum.intersectsBox( _box ) || ! _frustum.intersectsSphere( _sphere );
+						culled = ! _frustum.intersectsSphere( _sphere );
 
 					}
 
 					if ( ! culled ) {
 
 						// get the distance from camera used for sorting
-						const z = _vector.distanceToSquared( _sphere.center );
+						const z = _vector.distanceTo( _sphere.center );
 						_renderList.push( drawRanges[ i ], z );
 
 					}
@@ -978,7 +950,16 @@ class BatchedMesh extends Mesh {
 
 			// Sort the draw ranges and prep for rendering
 			const list = _renderList.list;
-			list.sort( material.transparent ? sortTransparent : sortOpaque );
+			const customSort = this.customSort;
+			if ( customSort === null ) {
+
+				list.sort( material.transparent ? sortTransparent : sortOpaque );
+
+			} else {
+
+				customSort.call( this, list, camera );
+
+			}
 
 			for ( let i = 0, l = list.length; i < l; i ++ ) {
 
@@ -1001,13 +982,10 @@ class BatchedMesh extends Mesh {
 					let culled = false;
 					if ( perObjectFrustumCulled ) {
 
-						// get the bounds in camera space
+						// get the bounds in world space
 						this.getMatrixAt( i, _matrix );
-
-						// get the bounds
-						this.getBoundingBoxAt( i, _box ).applyMatrix4( _matrix );
 						this.getBoundingSphereAt( i, _sphere ).applyMatrix4( _matrix );
-						culled = ! _frustum.intersectsBox( _box ) || ! _frustum.intersectsSphere( _sphere );
+						culled = ! _frustum.intersectsSphere( _sphere );
 
 					}
 
@@ -1028,6 +1006,12 @@ class BatchedMesh extends Mesh {
 
 		this._multiDrawCount = count;
 		this._visibilityChanged = false;
+
+	}
+
+	onBeforeShadow( renderer, object, camera, shadowCamera, geometry, depthMaterial/* , group */ ) {
+
+		this.onBeforeRender( renderer, null, shadowCamera, geometry, depthMaterial );
 
 	}
 

@@ -10,7 +10,8 @@ import RenderContexts from './RenderContexts.js';
 import Textures from './Textures.js';
 import Background from './Background.js';
 import Nodes from './nodes/Nodes.js';
-import { Scene, Frustum, Matrix4, Vector2, Vector3, Vector4, Color, DoubleSide, BackSide, FrontSide, SRGBColorSpace, NoToneMapping } from 'three';
+import Color4 from './Color4.js';
+import { Scene, Frustum, Matrix4, Vector2, Vector3, Vector4, DoubleSide, BackSide, FrontSide, SRGBColorSpace, NoToneMapping } from 'three';
 
 const _scene = new Scene();
 const _drawingBufferSize = new Vector2();
@@ -21,9 +22,15 @@ const _vector3 = new Vector3();
 
 class Renderer {
 
-	constructor( backend ) {
+	constructor( backend, parameters = {} ) {
 
 		this.isRenderer = true;
+
+		//
+
+		const {
+			logarithmicDepthBuffer = false,
+		} = parameters;
 
 		// public
 
@@ -35,6 +42,8 @@ class Renderer {
 		this.autoClearColor = true;
 		this.autoClearDepth = true;
 		this.autoClearStencil = true;
+
+		this.logarithmicDepthBuffer = logarithmicDepthBuffer;
 
 		this.outputColorSpace = SRGBColorSpace;
 
@@ -72,13 +81,11 @@ class Renderer {
 		this._background = null;
 
 		this._currentRenderContext = null;
-		this._lastRenderContext = null;
 
 		this._opaqueSort = null;
 		this._transparentSort = null;
 
-		this._clearAlpha = 1;
-		this._clearColor = new Color( 0x000000 );
+		this._clearColor = new Color4( 0x000000 );
 		this._clearDepth = 1;
 		this._clearStencil = 0;
 
@@ -291,6 +298,7 @@ class Renderer {
 			renderContext.depthTexture = renderTargetData.depthTexture;
 			renderContext.width = renderTargetData.width;
 			renderContext.height = renderTargetData.height;
+			renderContext.renderTarget = renderTarget;
 
 		} else {
 
@@ -339,11 +347,15 @@ class Renderer {
 		this._currentRenderContext = previousRenderContext;
 		this._currentRenderObjectFunction = previousRenderObjectFunction;
 
-		this._lastRenderContext = renderContext;
-
 		//
 
 		sceneRef.onAfterRender( this, scene, camera, renderTarget );
+
+	}
+
+	getMaxAnisotropy() {
+
+		return this.backend.getMaxAnisotropy();
 
 	}
 
@@ -537,19 +549,19 @@ class Renderer {
 	setClearColor( color, alpha = 1 ) {
 
 		this._clearColor.set( color );
-		this._clearAlpha = alpha;
+		this._clearColor.a = alpha;
 
 	}
 
 	getClearAlpha() {
 
-		return this._clearAlpha;
+		return this._clearColor.a;
 
 	}
 
 	setClearAlpha( alpha ) {
 
-		this._clearAlpha = alpha;
+		this._clearColor.a = alpha;
 
 	}
 
@@ -579,7 +591,7 @@ class Renderer {
 
 	isOccluded( object ) {
 
-		const renderContext = this._currentRenderContext || this._lastRenderContext;
+		const renderContext = this._currentRenderContext;
 
 		return renderContext && this.backend.isOccluded( renderContext, object );
 
@@ -587,9 +599,18 @@ class Renderer {
 
 	clear( color = true, depth = true, stencil = true ) {
 
-		const renderContext = this._currentRenderContext || this._lastRenderContext;
+		let renderTargetData = null;
+		const renderTarget = this._renderTarget;
 
-		if ( renderContext ) this.backend.clear( renderContext, color, depth, stencil );
+		if ( renderTarget !== null ) {
+
+			this._textures.updateRenderTarget( renderTarget );
+
+			renderTargetData = this._textures.get( renderTarget );
+
+		}
+
+		this.backend.clear( color, depth, stencil, renderTargetData );
 
 	}
 
@@ -608,6 +629,22 @@ class Renderer {
 	clearStencil() {
 
 		this.clear( false, false, true );
+
+	}
+
+	get currentColorSpace() {
+
+		const renderTarget = this._renderTarget;
+
+		if ( renderTarget !== null ) {
+
+			const texture = renderTarget.texture;
+
+			return ( Array.isArray( texture ) ? texture[ 0 ] : texture ).colorSpace;
+
+		}
+
+		return this.outputColorSpace;
 
 	}
 
@@ -737,7 +774,7 @@ class Renderer {
 
 	copyFramebufferToTexture( framebufferTexture ) {
 
-		const renderContext = this._currentRenderContext || this._lastRenderContext;
+		const renderContext = this._currentRenderContext;
 
 		this._textures.updateTexture( framebufferTexture );
 
@@ -905,13 +942,31 @@ class Renderer {
 
 	renderObject( object, scene, camera, geometry, material, group, lightsNode ) {
 
-		material = scene.overrideMaterial !== null ? scene.overrideMaterial : material;
+		let overridePositionNode;
 
 		//
 
 		object.onBeforeRender( this, scene, camera, geometry, material, group );
 
 		material.onBeforeRender( this, scene, camera, geometry, material, group );
+
+		//
+
+		if ( scene.overrideMaterial !== null ) {
+
+			const overrideMaterial = scene.overrideMaterial;
+
+			if ( material.positionNode && material.positionNode.isNode ) {
+
+				overridePositionNode = overrideMaterial.positionNode;
+
+				overrideMaterial.positionNode = material.positionNode;
+
+			}
+
+			material = overrideMaterial;
+
+		}
 
 		//
 
@@ -928,6 +983,14 @@ class Renderer {
 		} else {
 
 			this._renderObjectDirect( object, material, scene, camera, lightsNode );
+
+		}
+
+		//
+
+		if ( overridePositionNode !== undefined ) {
+
+			scene.overrideMaterial.positionNode = overridePositionNode;
 
 		}
 
