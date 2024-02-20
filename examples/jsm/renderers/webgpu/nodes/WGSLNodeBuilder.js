@@ -5,24 +5,27 @@ import NodeUniformsGroup from '../../common/nodes/NodeUniformsGroup.js';
 import NodeSampler from '../../common/nodes/NodeSampler.js';
 import { NodeSampledTexture, NodeSampledCubeTexture } from '../../common/nodes/NodeSampledTexture.js';
 
-import UniformBuffer from '../../common/UniformBuffer.js';
-import StorageBuffer from '../../common/StorageBuffer.js';
-import { getVectorLength, getStrideLength } from '../../common/BufferUtils.js';
+import NodeUniformBuffer from '../../common/nodes/NodeUniformBuffer.js';
+import NodeStorageBuffer from '../../common/nodes/NodeStorageBuffer.js';
 
-import { NodeBuilder, CodeNode, NodeMaterial } from '../../../nodes/Nodes.js';
+import { NodeBuilder, CodeNode } from '../../../nodes/Nodes.js';
 
 import { getFormat } from '../utils/WebGPUTextureUtils.js';
 
 import WGSLNodeParser from './WGSLNodeParser.js';
 
+// GPUShaderStage is not defined in browsers not supporting WebGPU
+const GPUShaderStage = self.GPUShaderStage;
+
 const gpuShaderStageLib = {
-	'vertex': GPUShaderStage.VERTEX,
-	'fragment': GPUShaderStage.FRAGMENT,
-	'compute': GPUShaderStage.COMPUTE
+	'vertex': GPUShaderStage ? GPUShaderStage.VERTEX : 1,
+	'fragment': GPUShaderStage ? GPUShaderStage.FRAGMENT : 2,
+	'compute': GPUShaderStage ? GPUShaderStage.COMPUTE : 4
 };
 
 const supports = {
-	instance: true
+	instance: true,
+	storageBuffer: true
 };
 
 const wgslFnOpLib = {
@@ -51,6 +54,11 @@ const wgslTypeLib = {
 	uvec4: 'vec4<u32>',
 	bvec4: 'vec4<bool>',
 
+	mat2: 'mat2x2<f32>',
+	imat2: 'mat2x2<i32>',
+	umat2: 'mat2x2<u32>',
+	bmat2: 'mat2x2<bool>',
+
 	mat3: 'mat3x3<f32>',
 	imat3: 'mat3x3<i32>',
 	umat3: 'mat3x3<u32>',
@@ -65,7 +73,10 @@ const wgslTypeLib = {
 const wgslMethods = {
 	dFdx: 'dpdx',
 	dFdy: '- dpdy',
-	mod: 'threejs_mod',
+	mod_float: 'threejs_mod_float',
+	mod_vec2: 'threejs_mod_vec2',
+	mod_vec3: 'threejs_mod_vec3',
+	mod_vec4: 'threejs_mod_vec4',
 	lessThanEqual: 'threejs_lessThanEqual',
 	greaterThan: 'threejs_greaterThan',
 	inversesqrt: 'inverseSqrt',
@@ -94,13 +105,10 @@ fn threejs_greaterThan( a : vec3<f32>, b : vec3<f32> ) -> vec3<bool> {
 
 }
 ` ),
-	mod: new CodeNode( `
-fn threejs_mod( x : f32, y : f32 ) -> f32 {
-
-	return x - y * floor( x / y );
-
-}
-` ),
+	mod_float: new CodeNode( 'fn threejs_mod_float( x : f32, y : f32 ) -> f32 { return x - y * floor( x / y ); }' ),
+	mod_vec2: new CodeNode( 'fn threejs_mod_vec2( x : vec2f, y : vec2f ) -> vec2f { return x - y * floor( x / y ); }' ),
+	mod_vec3: new CodeNode( 'fn threejs_mod_vec3( x : vec3f, y : vec3f ) -> vec3f { return x - y * floor( x / y ); }' ),
+	mod_vec4: new CodeNode( 'fn threejs_mod_vec4( x : vec4f, y : vec4f ) -> vec4f { return x - y * floor( x / y ); }' ),
 	repeatWrapping: new CodeNode( `
 fn threejs_repeatWrapping( uv : vec2<f32>, dimension : vec2<u32> ) -> vec2<u32> {
 
@@ -121,24 +129,6 @@ class WGSLNodeBuilder extends NodeBuilder {
 		this.uniformGroups = {};
 
 		this.builtins = {};
-
-	}
-
-	build() {
-
-		const { object, material } = this;
-
-		if ( material !== null ) {
-
-			NodeMaterial.fromMaterial( material ).build( this );
-
-		} else {
-
-			this.addFlow( 'compute', object );
-
-		}
-
-		return super.build();
 
 	}
 
@@ -222,6 +212,12 @@ class WGSLNodeBuilder extends NodeBuilder {
 
 	}
 
+	generateTextureStore( texture, textureProperty, uvIndexSnippet, valueSnippet ) {
+
+		return `textureStore( ${ textureProperty }, ${ uvIndexSnippet }, ${ valueSnippet } )`;
+
+	}
+
 	isUnfilterable( texture ) {
 
 		return texture.isDataTexture === true && texture.type === FloatType;
@@ -297,7 +293,7 @@ class WGSLNodeBuilder extends NodeBuilder {
 			const name = node.name;
 			const type = node.type;
 
-			if ( type === 'texture' || type === 'cubeTexture' ) {
+			if ( type === 'texture' || type === 'cubeTexture' || type === 'storageTexture' ) {
 
 				return name;
 
@@ -350,11 +346,11 @@ class WGSLNodeBuilder extends NodeBuilder {
 
 			const bindings = this.bindings[ shaderStage ];
 
-			if ( type === 'texture' || type === 'cubeTexture' ) {
+			if ( type === 'texture' || type === 'cubeTexture' || type === 'storageTexture' ) {
 
 				let texture = null;
 
-				if ( type === 'texture' ) {
+				if ( type === 'texture' || type === 'storageTexture' ) {
 
 					texture = new NodeSampledTexture( uniformNode.name, uniformNode.node );
 
@@ -386,8 +382,8 @@ class WGSLNodeBuilder extends NodeBuilder {
 
 			} else if ( type === 'buffer' || type === 'storageBuffer' ) {
 
-				const bufferClass = type === 'storageBuffer' ? StorageBuffer : UniformBuffer;
-				const buffer = new bufferClass( 'NodeBuffer_' + node.id, node.value );
+				const bufferClass = type === 'storageBuffer' ? NodeStorageBuffer : NodeUniformBuffer;
+				const buffer = new bufferClass( node );
 				buffer.setVisibility( gpuShaderStageLib[ shaderStage ] );
 
 				bindings.push( buffer );
@@ -414,31 +410,9 @@ class WGSLNodeBuilder extends NodeBuilder {
 
 				}
 
-				if ( node.isArrayUniformNode === true ) {
+				uniformGPU = this.getNodeUniform( uniformNode, type );
 
-					uniformGPU = [];
-
-					for ( const uniformNode of node.nodes ) {
-
-						const uniformNodeGPU = this.getNodeUniform( uniformNode, type );
-
-						// fit bounds to buffer
-						uniformNodeGPU.boundary = getVectorLength( uniformNodeGPU.itemSize );
-						uniformNodeGPU.itemSize = getStrideLength( uniformNodeGPU.itemSize );
-
-						uniformsGroup.addUniform( uniformNodeGPU );
-
-						uniformGPU.push( uniformNodeGPU );
-
-					}
-
-				} else {
-
-					uniformGPU = this.getNodeUniform( uniformNode, type );
-
-					uniformsGroup.addUniform( uniformGPU );
-
-				}
+				uniformsGroup.addUniform( uniformGPU );
 
 			}
 
@@ -737,7 +711,7 @@ ${ flowData.code }
 
 		for ( const uniform of uniforms ) {
 
-			if ( uniform.type === 'texture' || uniform.type === 'cubeTexture' ) {
+			if ( uniform.type === 'texture' || uniform.type === 'cubeTexture' || uniform.type === 'storageTexture' ) {
 
 				const texture = uniform.node.value;
 
@@ -809,17 +783,7 @@ ${ flowData.code }
 					snippets: []
 				} );
 
-				if ( Array.isArray( uniform.value ) === true ) {
-
-					const length = uniform.value.length;
-
-					group.snippets.push( `uniform ${vectorType}[ ${length} ] ${uniform.name}` );
-
-				} else {
-
-					group.snippets.push( `\t${uniform.name} : ${ vectorType}` );
-
-				}
+				group.snippets.push( `\t${ uniform.name } : ${ vectorType }` );
 
 			}
 
@@ -936,15 +900,23 @@ ${ flowData.code }
 
 	}
 
-	getMethod( method ) {
+	getMethod( method, output = null ) {
 
-		if ( wgslPolyfill[ method ] !== undefined ) {
+		let wgslMethod;
 
-			this._include( method );
+		if ( output !== null ) {
+
+			wgslMethod = this._getWGSLMethod( method + '_' + output );
 
 		}
 
-		return wgslMethods[ method ] || method;
+		if ( wgslMethod === undefined ) {
+
+			wgslMethod = this._getWGSLMethod( method );
+
+		}
+
+		return wgslMethod || method;
 
 	}
 
@@ -957,6 +929,18 @@ ${ flowData.code }
 	isAvailable( name ) {
 
 		return supports[ name ] === true;
+
+	}
+
+	_getWGSLMethod( method ) {
+
+		if ( wgslPolyfill[ method ] !== undefined ) {
+
+			this._include( method );
+
+		}
+
+		return wgslMethods[ method ];
 
 	}
 

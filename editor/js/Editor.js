@@ -27,10 +27,11 @@ function Editor() {
 		startPlayer: new Signal(),
 		stopPlayer: new Signal(),
 
-		// vr
+		// xr
 
-		toggleVR: new Signal(),
-		exitedVR: new Signal(),
+		enterXR: new Signal(),
+		offerXR: new Signal(),
+		leaveXR: new Signal(),
 
 		// notifications
 
@@ -624,11 +625,15 @@ Editor.prototype = {
 
 		var objects = this.scene.children;
 
+		this.signals.sceneGraphChanged.active = false;
+
 		while ( objects.length > 0 ) {
 
 			this.removeObject( objects[ 0 ] );
 
 		}
+
+		this.signals.sceneGraphChanged.active = true;
 
 		this.geometries = {};
 		this.materials = {};
@@ -707,7 +712,6 @@ Editor.prototype = {
 			project: {
 				shadows: this.config.getKey( 'project/renderer/shadows' ),
 				shadowType: this.config.getKey( 'project/renderer/shadowType' ),
-				vr: this.config.getKey( 'project/vr' ),
 				toneMapping: this.config.getKey( 'project/renderer/toneMapping' ),
 				toneMappingExposure: this.config.getKey( 'project/renderer/toneMappingExposure' )
 			},
@@ -743,8 +747,44 @@ Editor.prototype = {
 
 		this.history.redo();
 
+	},
+
+	utils: {
+
+		save: save,
+		saveArrayBuffer: saveArrayBuffer,
+		saveString: saveString
+
 	}
 
 };
+
+const link = document.createElement( 'a' );
+
+function save( blob, filename ) {
+
+	if ( link.href ) {
+
+		URL.revokeObjectURL( link.href );
+
+	}
+
+	link.href = URL.createObjectURL( blob );
+	link.download = filename || 'data.json';
+	link.dispatchEvent( new MouseEvent( 'click' ) );
+
+}
+
+function saveArrayBuffer( buffer, filename ) {
+
+	save( new Blob( [ buffer ], { type: 'application/octet-stream' } ), filename );
+
+}
+
+function saveString( text, filename ) {
+
+	save( new Blob( [ text ], { type: 'text/plain' } ), filename );
+
+}
 
 export { Editor };

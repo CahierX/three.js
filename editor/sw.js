@@ -26,6 +26,8 @@ const assets = [
 
 	'../examples/jsm/libs/meshopt_decoder.module.js',
 
+	'../examples/jsm/libs/mikktspace.module.js',
+
 	'../examples/jsm/libs/motion-controllers.module.js',
 
 	'../examples/jsm/libs/rhino3dm/rhino3dm.wasm',
@@ -73,7 +75,8 @@ const assets = [
 
 	'../examples/jsm/helpers/VertexNormalsHelper.js',
 
-	'../examples/jsm/webxr/VRButton.js',
+	'../examples/jsm/utils/BufferGeometryUtils.js',
+
 	'../examples/jsm/webxr/XRControllerModelFactory.js',
 
 	'./images/rotate.svg',
@@ -134,7 +137,6 @@ const assets = [
 	'./js/Menubar.File.js',
 	'./js/Menubar.Edit.js',
 	'./js/Menubar.Add.js',
-	'./js/Menubar.Play.js',
 	'./js/Menubar.Examples.js',
 	'./js/Menubar.Help.js',
 	'./js/Menubar.View.js',
@@ -143,8 +145,9 @@ const assets = [
 	'./js/Sidebar.js',
 	'./js/Sidebar.Scene.js',
 	'./js/Sidebar.Project.js',
-	'./js/Sidebar.Project.Materials.js',
 	'./js/Sidebar.Project.Renderer.js',
+	'./js/Sidebar.Project.Materials.js',
+	'./js/Sidebar.Project.App.js',
 	'./js/Sidebar.Project.Video.js',
 	'./js/Sidebar.Settings.js',
 	'./js/Sidebar.Settings.History.js',
@@ -187,7 +190,7 @@ const assets = [
 	'./js/Viewport.Info.js',
 	'./js/Viewport.Selector.js',
 	'./js/Viewport.ViewHelper.js',
-	'./js/Viewport.VR.js',
+	'./js/Viewport.XR.js',
 
 	'./js/Command.js',
 	'./js/commands/AddObjectCommand.js',
@@ -269,8 +272,13 @@ async function networkFirst( request ) {
 
 		}
 
-		const cache = await caches.open( cacheName );
-		cache.put( request, response.clone() );
+		if ( request.method === 'GET' ) {
+
+			const cache = await caches.open( cacheName );
+			cache.put( request, response.clone() );
+
+		}
+
 		return response;
 
 	} catch {
