@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<title>three.js webgl - octree </title>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+	<link type="text/css" rel="stylesheet" href="main.css">
+</head>
+
+<body>
+	<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.module.js",
+					"three/addons/": "./jsm/"
+				}
+			}
+		</script>
+
+	<script type="module">
+
+		import * as THREE from 'three';
+
+		import Stats from 'three/addons/libs/stats.module.js';
+		import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+		import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+		import { Octree } from 'three/addons/math/Octree.js';
+		import { OctreeHelper } from 'three/addons/helpers/OctreeHelper.js';
+
+		let camera, scene, renderer, controls, stats;
+		let octree, octreeHelper;
+
+		let mesh;
+		const positions = [];
+		const count = 10000;
+
+		const mouse = new THREE.Vector2( 1, 1 );
+
+		const color = new THREE.Color();
+		const redColor = new THREE.Color( 1, 0, 0 );
+
+		init();
+		animate();
+
+		function init() {
+
+			camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 0.1, 2000 );
+			camera.position.set( 0, 0, 100 );
+			camera.lookAt( 0, 0, 0 );
+
+			scene = new THREE.Scene();
+
+			const light = new THREE.HemisphereLight( 0xffffff, 0x888888, 3 );
+			light.position.set( 0, 1, 0 );
+			scene.add( light );
+
+
+			octree = new Octree();
+
+
+
+			const geometry = new THREE.IcosahedronGeometry( 0.15, 3 );
+			const material = new THREE.MeshPhongMaterial( { color: 0xffffff } );
+
+			mesh = new THREE.InstancedMesh( geometry, material, count );
+			const matrix = new THREE.Matrix4();
+			for ( let i = 0; i < count; i ++ ) {
+
+				const point = new THREE.Vector3( Math.random() * 100 - 50, Math.random() * 100 - 50, 0 );
+				matrix.setPosition( point );
+				mesh.setMatrixAt( i, matrix );
+				mesh.setColorAt( i, color );
+
+				// add octree triangle
+				const triangle = new THREE.Triangle( point, point, point );
+				triangle.index = i;
+				octree.addTriangle( triangle );
+
+				positions.push( point );
+
+			}
+
+			// build octree
+			octree.build();
+
+			// create octree helper
+			octreeHelper = new OctreeHelper( octree );
+			scene.add( octreeHelper );
+			scene.add( mesh );
+
+
+			renderer = new THREE.WebGLRenderer( { antialias: true } );
+			renderer.setPixelRatio( window.devicePixelRatio );
+			renderer.setSize( window.innerWidth, window.innerHeight );
+			document.body.appendChild( renderer.domElement );
+
+			controls = new OrbitControls( camera, renderer.domElement );
+
+			stats = new Stats();
+			document.body.appendChild( stats.dom );
+
+			window.addEventListener( 'resize', onWindowResize );
+			document.addEventListener( 'mousemove', onMouseMove );
+			initGui();
+
+		}
+
+		function onWindowResize() {
+
+			camera.aspect = window.innerWidth / window.innerHeight;
+			camera.updateProjectionMatrix();
+
+			renderer.setSize( window.innerWidth, window.innerHeight );
+
+		}
+
+		function onMouseMove( event ) {
+
+			event.preventDefault();
+
+			mouse.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+			mouse.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+
+			const origin = camera.position.clone();
+			const direction = new THREE.Vector3( mouse.x, mouse.y, 0.5 ).unproject( camera ).sub( origin ).normalize();
+			const ray = new THREE.Ray( origin, direction );
+			const triangles = [];
+			// get triangles by ray
+			octree.getRayTriangles( ray, triangles );
+			triangles.forEach( item => {
+
+				mesh.setColorAt( item.index, redColor );
+
+			} );
+			mesh.instanceColor.needsUpdate = true;
+
+		}
+
+		function animate() {
+
+			requestAnimationFrame( animate );
+
+			controls.update();
+
+
+			render();
+
+			stats.update();
+
+		}
+
+		function render() {
+
+			renderer.render( scene, camera );
+
+		}
+
+		function initGui() {
+
+			const gui = new GUI();
+			const param = {
+				octreeSpilt: 10,
+				isShowOctreeHelper: true,
+			};
+
+			gui.add( param, 'octreeSpilt', 1, 16, 1 ).onChange( ( val ) => {
+
+				// clear old octree
+				octree.clear();
+				for ( let i = 0; i < positions.length; i ++ ) {
+
+					const point = new THREE.Vector3( positions[ i ].x, positions[ i ].y, positions[ i ].z );
+					const triangle = new THREE.Triangle( point, point, point );
+					triangle.index = i;
+					octree.addTriangle( triangle );
+					mesh.setColorAt( i, color );
+
+				}
+
+				octree.calcBox();
+				octree.split( val ); // split octree by depth
+				octreeHelper.update(); // update octree helper
+
+			} );
+
+
+			gui.add( param, 'isShowOctreeHelper' ).onChange( function ( val ) {
+
+				octreeHelper.visible = val;
+
+			} );
+
+
+
+
+
+
+		}
+	</script>
+</body>
+
+</html>
